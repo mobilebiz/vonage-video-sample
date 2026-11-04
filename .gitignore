@@ -1,0 +1,7 @@
+node_modules/
+cdk.out/
+.env
+*.key
+*.pem
+qr.png
+qr.html
