@@ -23,29 +23,42 @@ export function videoFilterFor(id, orientation) {
   return null;
 }
 
-/** 入室前の推定。スマホを縦に持っていればカメラ映像も縦長になる */
-export const guessOrientation = () => (window.innerHeight >= window.innerWidth ? 'portrait' : 'landscape');
+const orientationOf = (publisher) => {
+  const w = publisher.videoWidth?.();
+  const h = publisher.videoHeight?.();
+  if (!w || !h) return window.innerHeight >= window.innerWidth ? 'portrait' : 'landscape';
+  return h >= w ? 'portrait' : 'landscape';
+};
+
+const applied = new WeakMap(); // publisher -> 適用済みの画像の向き
 
 /**
- * Publisher に背景を適用し、映像の向きが変わったら（スマホの回転など）画像を差し替える。
- * initPublisher の videoFilter で推定の向きの画像をかけておき、実際の映像サイズがわかったら合わせ直す。
+ * 選んだ背景を Publisher にかける。カメラ映像の実際の向きに合った画像を使う。
+ * 失敗したら例外を投げる（呼び出し側で、素の映像を配信しないようにする）。
  */
-export function attachBackground(publisher, id, onError) {
+export async function applyBackground(publisher, id) {
+  if (findBackground(id).type === 'none') return;
+  if (!isSupported()) throw new Error('video filters are not supported on this device');
+  const orientation = orientationOf(publisher);
+  await publisher.applyVideoFilter(videoFilterFor(id, orientation));
+  applied.set(publisher, orientation);
+}
+
+/**
+ * 映像の向きが変わったら（スマホの回転など）、背景画像をその向きのものに差し替える。
+ * 適用に成功したときだけ向きを記録するので、失敗しても次のイベントで再試行される。
+ */
+export function watchOrientation(publisher, id, onError) {
   if (!usesImage(id)) return;
-  let current = guessOrientation();
-  const sync = async () => {
-    const w = publisher.videoWidth?.();
-    const h = publisher.videoHeight?.();
-    if (!w || !h) return;
-    const actual = h >= w ? 'portrait' : 'landscape';
-    if (actual === current) return;
-    current = actual;
+  publisher.on('videoDimensionsChanged', async () => {
+    const done = applied.get(publisher);
+    const actual = orientationOf(publisher);
+    if (!done || actual === done) return; // 初回の適用前、または向きが同じ
     try {
       await publisher.applyVideoFilter(videoFilterFor(id, actual));
+      applied.set(publisher, actual);
     } catch (err) {
       onError?.(err);
     }
-  };
-  publisher.on('videoElementCreated', () => setTimeout(sync, 500));
-  publisher.on('videoDimensionsChanged', sync);
+  });
 }

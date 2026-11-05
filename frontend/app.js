@@ -324,28 +324,38 @@ function startPublishing() {
     frameRate: 15,
     // 背景画像のときは鏡像にしない（自分の画面でロゴや文字が左右反転して見えるため）
     mirror: !vbg.usesImage(state.background),
-    ...(vbg.isSupported() && state.background !== 'none'
-      ? { videoFilter: vbg.videoFilterFor(state.background, vbg.guessOrientation()) }
-      : {}),
     publishAudio: true,
     publishVideo: true,
-  }, (err) => {
+  }, async (err) => {
     if (err) {
       console.error(err);
       toast(t(state.lang, 'errMedia'));
+      return;
     }
+    // 背景を選んだ人の映像は、フィルターが確実にかかってから配信する（素の映像が相手に届かないように）
+    try {
+      await vbg.applyBackground(publisher, state.background);
+    } catch (filterErr) {
+      console.warn('video filter', filterErr);
+      toast(t(state.lang, 'errFilter'));
+      // 失敗したら映像はオフにして音声だけで参加する。カメラを入れ直すかは本人が選ぶ
+      state.camOn = false;
+      publisher.publishVideo(false);
+      tile.classList.add('video-off');
+      updateControls();
+    }
+    if (state.leaving || state.publisher !== publisher) return;
+    state.session.publish(publisher, (pubErr) => {
+      if (pubErr) { console.error(pubErr); toast(t(state.lang, 'errConnect', { msg: pubErr.message })); return; }
+      tile.classList.toggle('video-off', !state.camOn);
+      startStt();
+    });
   });
   state.publisher = publisher;
-  vbg.attachBackground(publisher, state.background, (err) => { console.warn('video filter', err); toast(t(state.lang, 'errFilter')); });
+  vbg.watchOrientation(publisher, state.background, (err) => { console.warn('video filter', err); toast(t(state.lang, 'errFilter')); });
   publisher.on('accessDenied', () => toast(t(state.lang, 'errMedia')));
   publisher.on('videoElementCreated', () => tile.classList.toggle('video-off', !state.camOn));
   publisher.on('audioLevelUpdated', (e) => tile.classList.toggle('speaking', state.micOn && e.audioLevel > 0.08));
-
-  state.session.publish(publisher, (err) => {
-    if (err) { console.error(err); toast(t(state.lang, 'errConnect', { msg: err.message })); return; }
-    tile.classList.toggle('video-off', !state.camOn);
-    startStt();
-  });
   updateControls();
 }
 
