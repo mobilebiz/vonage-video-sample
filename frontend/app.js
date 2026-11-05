@@ -36,6 +36,7 @@ const state = {
   history: [], // 翻訳の文脈用（確定した発言の原文）
   leaving: false,
   meetingEndsAt: 0, // この端末の時計での会議終了時刻 (ms)
+  camera: null, // 背景フィルター用に自前で取得したカメラ（createUprightCamera）
   timer: null,
 };
 
@@ -315,15 +316,31 @@ const VIDEO_OPTS = {
   showControls: false,
 };
 
-function startPublishing() {
+async function startPublishing() {
   const myId = state.session.connection.connectionId;
   const tile = getTile(myId);
+  // 背景を使うときは、回転情報を持たないカメラ映像を自前で作って渡す（スマホで映像が横倒しになるのを防ぐ）
+  let sources = {};
+  if (state.background !== 'none' && vbg.isSupported()) {
+    try {
+      state.camera = await vbg.createUprightCamera({ frameRate: 15 });
+      sources = { videoSource: state.camera.videoTrack, audioSource: state.camera.audioTrack };
+    } catch (err) {
+      console.error(err);
+      toast(t(state.lang, 'errMedia'));
+      return;
+    }
+    if (state.leaving) { state.camera?.stop(); state.camera = null; return; }
+  }
+  const initialOrientation = state.camera?.orientation();
   const publisher = OT.initPublisher(tile.querySelector('.video'), {
     ...VIDEO_OPTS,
+    ...sources,
     resolution: '640x480',
     frameRate: 15,
     // 背景画像のときは鏡像にしない（自分の画面でロゴや文字が左右反転して見えるため）
     mirror: !vbg.usesImage(state.background),
+    ...(state.camera ? { videoFilter: vbg.initialFilter(state.background, initialOrientation) } : {}),
     publishAudio: true,
     publishVideo: true,
   }, async (err) => {
@@ -332,9 +349,9 @@ function startPublishing() {
       toast(t(state.lang, 'errMedia'));
       return;
     }
-    // 背景を選んだ人の映像は、フィルターが確実にかかってから配信する（素の映像が相手に届かないように）
+    // 背景を選んだ人の映像は、フィルターが確実にかかったことを確かめてから配信する（素の映像が相手に届かないように）
     try {
-      await vbg.applyBackground(publisher, state.background);
+      if (state.camera) await vbg.confirmBackground(publisher, state.background, initialOrientation);
     } catch (filterErr) {
       console.warn('video filter', filterErr);
       toast(t(state.lang, 'errFilter'));
@@ -414,6 +431,8 @@ function leave(reason) {
   state.session?.disconnect();
   state.session = null;
   state.publisher = null;
+  state.camera?.stop();
+  state.camera = null;
   clearTimeout(partialTimer);
   $('#grid').innerHTML = '';
   $('#captions').innerHTML = '';

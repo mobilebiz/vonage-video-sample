@@ -33,21 +33,25 @@ const orientationOf = (publisher) => {
 const applied = new WeakMap(); // publisher -> 適用済みの画像の向き
 
 /**
- * 選んだ背景を Publisher にかける。カメラ映像の実際の向きに合った画像を使う。
- * 失敗したら例外を投げる（呼び出し側で、素の映像を配信しないようにする）。
+ * 初回のフィルターは OT.initPublisher の videoFilter オプションで渡す。
+ * そうすると SDK は「処理の準備ができるまで素の映像の代わりに空の映像を流す」モードで適用するので、
+ * 背景を隠したい人の部屋が一瞬でも相手に映ることがない（後から applyVideoFilter するとこの保護がない）。
+ * @param {'portrait'|'landscape'} orientation
  */
-export async function applyBackground(publisher, id) {
+export const initialFilter = (id, orientation) => videoFilterFor(id, orientation);
+
+/**
+ * initPublisher の完了後に呼ぶ。フィルターが本当にかかったかを確かめ（SDK は失敗してもログだけで進む）、
+ * かかっていなければ例外を投げる。初回の適用中に端末が回転していたら、今の向きの画像に合わせ直す。
+ */
+export async function confirmBackground(publisher, id, orientation) {
   if (findBackground(id).type === 'none') return;
-  if (!isSupported()) throw new Error('video filters are not supported on this device');
-  let orientation = orientationOf(publisher);
-  await publisher.applyVideoFilter(videoFilterFor(id, orientation));
-  // 適用中に端末が回転していたら（その間の videoDimensionsChanged は捨てている）、今の向きで掛け直す
+  if (!publisher.getVideoFilter?.()) throw new Error('the initial video filter was not applied');
   const now = orientationOf(publisher);
-  if (now !== orientation) {
-    await publisher.applyVideoFilter(videoFilterFor(id, now));
-    orientation = now;
+  if (usesImage(id) && now !== orientation) {
+    await publisher.applyVideoFilter(videoFilterFor(id, now)); // 同じ種類のフィルターの更新なので素の映像は流れない
   }
-  applied.set(publisher, orientation);
+  applied.set(publisher, now);
 }
 
 /**
@@ -67,4 +71,70 @@ export function watchOrientation(publisher, id, onError) {
       onError?.(err);
     }
   });
+}
+
+/**
+ * 背景フィルター用に「回転情報を持たない」カメラ映像を作る。
+ *
+ * スマホのカメラ映像のフレームには回転情報（縦持ちなら 90°）が付いている。SDK 内蔵の
+ * 背景処理（ml-transformers）はこれを見てフレームを回転させるが、端末によってはブラウザ側でも
+ * 回転済みのため二重に回り、相手には横倒しの映像が届いてしまう。
+ * そこでカメラ映像を一度 canvas に描き直し（描画時に正しい向きになる）、canvas の映像を SDK に渡す。
+ */
+export async function createUprightCamera({ frameRate = 15 } = {}) {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: frameRate } },
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  const [cameraTrack] = stream.getVideoTracks();
+  const [audioTrack] = stream.getAudioTracks();
+
+  // iOS Safari は DOM にない video 要素をデコードしないことがあるので、見えない形で置く
+  const video = document.createElement('video');
+  Object.assign(video, { muted: true, playsInline: true, autoplay: true });
+  video.setAttribute('playsinline', '');
+  video.style.cssText = 'position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none;';
+  video.srcObject = new MediaStream([cameraTrack]);
+  document.body.append(video);
+  await video.play().catch(() => {});
+  await new Promise((resolve) => {
+    if (video.videoWidth) resolve();
+    else video.addEventListener('loadedmetadata', resolve, { once: true });
+  });
+
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  let stopped = false;
+  const draw = () => {
+    if (stopped) return;
+    const w = video.videoWidth;
+    const h = video.videoHeight;
+    if (w && h) {
+      // 端末の回転で縦横が変わったら canvas も合わせる（相手の映像も縦横が切り替わる）
+      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+      ctx.drawImage(video, 0, 0, w, h);
+    }
+  };
+  draw();
+  const videoTrack = canvas.captureStream(frameRate).getVideoTracks()[0];
+  let timer;
+  if (typeof video.requestVideoFrameCallback === 'function') {
+    const loop = () => { draw(); if (!stopped) video.requestVideoFrameCallback(loop); };
+    video.requestVideoFrameCallback(loop);
+  } else {
+    timer = setInterval(draw, 1000 / frameRate);
+  }
+
+  return {
+    videoTrack,
+    audioTrack,
+    orientation: () => (canvas.height >= canvas.width ? 'portrait' : 'landscape'),
+    stop() {
+      stopped = true;
+      clearInterval(timer);
+      [cameraTrack, audioTrack, videoTrack].forEach((t) => t?.stop());
+      video.srcObject = null;
+      video.remove();
+    },
+  };
 }
