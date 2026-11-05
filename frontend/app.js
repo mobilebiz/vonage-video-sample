@@ -9,7 +9,8 @@
 import { t } from './i18n.js';
 import { TranscribeStt } from './stt-transcribe.js';
 import { WebSpeechStt } from './stt-webspeech.js';
-import { poweredByHref } from './config.js';
+import { poweredByHref, BACKGROUNDS } from './config.js';
+import * as vbg from './background.js';
 
 const params = new URLSearchParams(location.search);
 const ROOM = params.get('room') || 'demo';
@@ -23,6 +24,7 @@ const $ = (sel) => document.querySelector(sel);
 const state = {
   lang: 'ja',
   name: '',
+  background: 'none',
   session: null,
   publisher: null,
   join: null, // /api/join のレスポンス
@@ -93,6 +95,7 @@ function initLogin() {
   $('#room-label').textContent = ROOM;
   $('#powered-by').href = poweredByHref();
   const saved = JSON.parse(localStorage.getItem('vvs-profile') || '{}');
+  initBackgroundPicker(saved.background);
   if (saved.name) $('#name').value = saved.name;
   const initialLang = saved.lang || (navigator.language?.startsWith('ja') ? 'ja' : 'en');
   document.querySelector(`input[name=lang][value=${initialLang}]`).checked = true;
@@ -113,6 +116,31 @@ function initLogin() {
   $('#leave-btn').addEventListener('click', () => leave('left'));
 }
 
+function initBackgroundPicker(savedId) {
+  if (!vbg.isSupported()) return; // 非対応の端末では選択欄ごと出さない
+  const initial = vbg.findBackground(savedId).id;
+  const box = $('#bg-options');
+  for (const bg of BACKGROUNDS) {
+    const label = document.createElement('label');
+    label.className = `bg-option bg-${bg.type}`;
+    const input = document.createElement('input');
+    input.type = 'radio';
+    input.name = 'bg';
+    input.value = bg.id;
+    input.checked = bg.id === initial;
+    const face = document.createElement('span');
+    face.className = 'face';
+    if (bg.thumb) face.style.backgroundImage = `url("${bg.thumb}")`;
+    const text = document.createElement('span');
+    text.className = 'text';
+    text.dataset.i18n = bg.label;
+    text.textContent = t(state.lang, bg.label);
+    label.append(input, face, text);
+    box.append(label);
+  }
+  $('#bg-field').hidden = false;
+}
+
 function loginError(msg) {
   const el = $('#login-error');
   el.textContent = msg;
@@ -126,7 +154,8 @@ async function login() {
   if (!name || [...name].length > 20) { loginError(t(state.lang, 'errName')); return; }
   if (OT.checkSystemRequirements() !== 1) { loginError(t(state.lang, 'errUnsupported')); return; }
   state.name = name;
-  localStorage.setItem('vvs-profile', JSON.stringify({ name, lang: state.lang }));
+  state.background = vbg.isSupported() ? (document.querySelector('input[name=bg]:checked')?.value || 'none') : 'none';
+  localStorage.setItem('vvs-profile', JSON.stringify({ name, lang: state.lang, background: state.background }));
 
   // iOS Safari ではユーザー操作の中で AudioContext を作らないと音声処理が始まらない
   if (!state.audioContext) {
@@ -293,7 +322,11 @@ function startPublishing() {
     ...VIDEO_OPTS,
     resolution: '640x480',
     frameRate: 15,
-    mirror: true,
+    // 背景画像のときは鏡像にしない（自分の画面でロゴや文字が左右反転して見えるため）
+    mirror: !vbg.usesImage(state.background),
+    ...(vbg.isSupported() && state.background !== 'none'
+      ? { videoFilter: vbg.videoFilterFor(state.background, vbg.guessOrientation()) }
+      : {}),
     publishAudio: true,
     publishVideo: true,
   }, (err) => {
@@ -303,6 +336,7 @@ function startPublishing() {
     }
   });
   state.publisher = publisher;
+  vbg.attachBackground(publisher, state.background, (err) => { console.warn('video filter', err); toast(t(state.lang, 'errFilter')); });
   publisher.on('accessDenied', () => toast(t(state.lang, 'errMedia')));
   publisher.on('videoElementCreated', () => tile.classList.toggle('video-off', !state.camOn));
   publisher.on('audioLevelUpdated', (e) => tile.classList.toggle('speaking', state.micOn && e.audioLevel > 0.08));
@@ -380,6 +414,8 @@ function leave(reason) {
 function backToLogin(reason) {
   $('#name').value = state.name;
   document.querySelector(`input[name=lang][value=${state.lang}]`).checked = true;
+  const bgInput = document.querySelector(`input[name=bg][value="${state.background}"]`);
+  if (bgInput) bgInput.checked = true;
   applyI18n(state.lang);
   const messages = {
     full: t(state.lang, 'errRoomFull', { n: state.join?.maxParticipants || 4 }),
