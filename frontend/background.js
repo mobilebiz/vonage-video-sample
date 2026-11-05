@@ -73,6 +73,24 @@ export function watchOrientation(publisher, id, onError) {
   });
 }
 
+/** カメラ映像の寸法がわかるまで待つ。カメラが止まった・時間切れの場合は失敗にする */
+function waitForFirstFrame(video, track, timeoutMs) {
+  if (video.videoWidth) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const done = (fn, arg) => {
+      clearTimeout(timer);
+      video.removeEventListener('loadedmetadata', onMeta);
+      track.removeEventListener('ended', onEnded);
+      fn(arg);
+    };
+    const onMeta = () => done(resolve);
+    const onEnded = () => done(reject, new Error('camera track ended before the first frame'));
+    const timer = setTimeout(() => done(reject, new Error('camera did not start in time')), timeoutMs);
+    video.addEventListener('loadedmetadata', onMeta);
+    track.addEventListener('ended', onEnded);
+  });
+}
+
 /**
  * 背景フィルター用に「回転情報を持たない」カメラ映像を作る。
  *
@@ -96,11 +114,19 @@ export async function createUprightCamera({ frameRate = 15 } = {}) {
   video.style.cssText = 'position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none;';
   video.srcObject = new MediaStream([cameraTrack]);
   document.body.append(video);
-  await video.play().catch(() => {});
-  await new Promise((resolve) => {
-    if (video.videoWidth) resolve();
-    else video.addEventListener('loadedmetadata', resolve, { once: true });
-  });
+  const cleanup = () => {
+    stream.getTracks().forEach((t) => t.stop());
+    video.srcObject = null;
+    video.remove();
+  };
+  try {
+    // 再生できないと canvas が更新されず真っ暗な映像を配信してしまうので、失敗は呼び出し元に伝える
+    // フレームが来ないと play() 自体が終わらないので、最初のフレーム待ち（時間切れあり）と同時に待つ
+    await Promise.all([video.play(), waitForFirstFrame(video, cameraTrack, 10000)]);
+  } catch (err) {
+    cleanup();
+    throw err;
+  }
 
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
@@ -132,9 +158,8 @@ export async function createUprightCamera({ frameRate = 15 } = {}) {
     stop() {
       stopped = true;
       clearInterval(timer);
-      [cameraTrack, audioTrack, videoTrack].forEach((t) => t?.stop());
-      video.srcObject = null;
-      video.remove();
+      videoTrack?.stop();
+      cleanup();
     },
   };
 }

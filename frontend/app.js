@@ -317,22 +317,30 @@ const VIDEO_OPTS = {
 };
 
 async function startPublishing() {
-  const myId = state.session.connection.connectionId;
+  const { session } = state; // この呼び出しが属する会議（待っている間に退出・再入室された場合の判定用）
+  const isStale = () => state.leaving || state.session !== session;
+  const myId = session.connection.connectionId;
   const tile = getTile(myId);
   // 背景を使うときは、回転情報を持たないカメラ映像を自前で作って渡す（スマホで映像が横倒しになるのを防ぐ）
+  let camera = null;
   let sources = {};
   if (state.background !== 'none' && vbg.isSupported()) {
     try {
-      state.camera = await vbg.createUprightCamera({ frameRate: 15 });
-      sources = { videoSource: state.camera.videoTrack, audioSource: state.camera.audioTrack };
+      camera = await vbg.createUprightCamera({ frameRate: 15 });
     } catch (err) {
       console.error(err);
-      toast(t(state.lang, 'errMedia'));
+      if (!isStale()) toast(t(state.lang, 'errMedia'));
       return;
     }
-    if (state.leaving) { state.camera?.stop(); state.camera = null; return; }
+    if (isStale()) { camera.stop(); return; } // 前の会議の分は捨てる
+    state.camera = camera;
+    sources = { videoSource: camera.videoTrack, audioSource: camera.audioTrack };
   }
-  const initialOrientation = state.camera?.orientation();
+  const releaseCamera = () => {
+    camera?.stop();
+    if (state.camera === camera) state.camera = null;
+  };
+  const initialOrientation = camera?.orientation();
   const publisher = OT.initPublisher(tile.querySelector('.video'), {
     ...VIDEO_OPTS,
     ...sources,
@@ -340,18 +348,20 @@ async function startPublishing() {
     frameRate: 15,
     // 背景画像のときは鏡像にしない（自分の画面でロゴや文字が左右反転して見えるため）
     mirror: !vbg.usesImage(state.background),
-    ...(state.camera ? { videoFilter: vbg.initialFilter(state.background, initialOrientation) } : {}),
-    publishAudio: true,
-    publishVideo: true,
+    ...(camera ? { videoFilter: vbg.initialFilter(state.background, initialOrientation) } : {}),
+    // カメラの準備中にミュート・ビデオ OFF が押されていたら、その状態で始める
+    publishAudio: state.micOn,
+    publishVideo: state.camOn,
   }, async (err) => {
     if (err) {
       console.error(err);
-      toast(t(state.lang, 'errMedia'));
+      releaseCamera();
+      if (!isStale()) toast(t(state.lang, 'errMedia'));
       return;
     }
     // 背景を選んだ人の映像は、フィルターが確実にかかったことを確かめてから配信する（素の映像が相手に届かないように）
     try {
-      if (state.camera) await vbg.confirmBackground(publisher, state.background, initialOrientation);
+      if (camera) await vbg.confirmBackground(publisher, state.background, initialOrientation);
     } catch (filterErr) {
       console.warn('video filter', filterErr);
       toast(t(state.lang, 'errFilter'));
@@ -361,8 +371,8 @@ async function startPublishing() {
       tile.classList.add('video-off');
       updateControls();
     }
-    if (state.leaving || state.publisher !== publisher) return;
-    state.session.publish(publisher, (pubErr) => {
+    if (isStale() || state.publisher !== publisher) return;
+    session.publish(publisher, (pubErr) => {
       if (pubErr) { console.error(pubErr); toast(t(state.lang, 'errConnect', { msg: pubErr.message })); return; }
       tile.classList.toggle('video-off', !state.camOn);
       startStt();
