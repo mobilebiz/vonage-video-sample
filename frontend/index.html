@@ -25,6 +25,11 @@
           <label><input type="radio" name="lang" value="en"><span>English</span></label>
         </div>
       </fieldset>
+      <!-- バーチャル背景（非対応の端末では表示しない） -->
+      <fieldset id="bg-field" class="field" hidden>
+        <legend data-i18n="background"></legend>
+        <div id="bg-options" class="bg-options" role="radiogroup"></div>
+      </fieldset>
       <p class="muted small"><span data-i18n="room"></span>: <b id="room-label"></b></p>
       <p id="login-error" class="error" role="alert" hidden></p>
       <button id="login-btn" type="submit" class="primary" data-i18n="login"></button>

@@ -37,6 +37,18 @@ button.primary { width: 100%; padding: 15px; border: 0; border-radius: 14px; bac
 button.primary:disabled { opacity: .6; }
 .error { color: #fca5a5; background: rgba(239,68,68,.12); padding: 10px 12px; border-radius: 10px; font-size: .9rem; }
 
+/* バーチャル背景の選択 */
+.bg-options { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.bg-option { display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: pointer; min-width: 0; }
+.bg-option input { position: absolute; opacity: 0; pointer-events: none; }
+.bg-option .face { width: 100%; aspect-ratio: 3 / 4; border-radius: 10px; border: 2px solid #334155; background: #0b1220 center / cover no-repeat; }
+.bg-option.bg-none .face { background-image: linear-gradient(135deg, transparent 47%, #64748b 47% 53%, transparent 53%); }
+.bg-option.bg-blur .face { background-image: radial-gradient(circle at 50% 42%, #cbd5e1 0 18%, transparent 19%), linear-gradient(160deg, #475569, #1e293b); filter: blur(.4px); }
+.bg-option input:checked + .face { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.bg-option input:focus-visible + .face { outline: 2px solid #a5b4fc; outline-offset: 2px; }
+.bg-option .text { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.bg-option input:checked ~ .text { color: var(--text); font-weight: 600; }
+
 /* ---------- 会議室 ---------- */
 #room-view { position: fixed; inset: 0; overflow: hidden; }
 #timer {

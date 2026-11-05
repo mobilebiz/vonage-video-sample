@@ -7,6 +7,7 @@
 - 他の人の発言は自分の言語に翻訳して字幕表示。同じ言語の相手なら翻訳しない（文字起こしだけ）
 - マイクのミュート、ビデオの ON/OFF、退出ボタン（退出するとログイン画面に戻り、入力した名前・言語は残る）
 - ログイン画面の下に「Powered by Vonage」リンク
+- バーチャル背景（なし／ぼかし／画像 3 種）をログイン画面で選べる。画像の右上には Vonage のロゴ入り
 - 1 回の会議は最大 3 分。画面上部に残り時間を表示し、時間になると全員を退出させる
 
 ## 構成
@@ -43,6 +44,19 @@
 - 終了時刻には EventBridge Scheduler が Lambda を起動し、残っている接続を Vonage 側で強制切断します。改造したクライアントでも居座れません（Scheduler の起動は最大で 1 分ほど遅れることがあります）
 - 全員が退出したあとに誰かが入室すると、新しい会議として 3 分のカウントが始まります
 - 翻訳・文字起こし用のチケットは会議の終了時刻 + 60 秒まで、Vonage のトークンは発行から 2 分（接続に使うまで）だけ有効です
+
+### バーチャル背景
+
+Vonage Video SDK に内蔵のビデオフィルター（`publisher.applyVideoFilter()`）を使っています。処理はすべて端末の中で行われ、AWS の費用は増えません。
+
+- **対応端末:** Chrome・Edge・Firefox（PC / Android）、iPhone・iPad は iOS 26 以上の Safari。`OT.hasMediaProcessorSupport('video')` が false の端末では、選択欄を出しません
+- **選択肢:** なし／ぼかし／画像（オフィス・夜景・和室）。ログイン画面で選び、退出後も選択は残ります
+- **画像の向き:** SDK は背景画像を映像のサイズに引き伸ばすため、縦長（960×1280）と横長（1280×960）の 2 種類を用意し、カメラ映像の向きに合わせて切り替えます（スマホを回転した場合も追従）
+- **鏡像表示:** 背景画像を選んだときは、自分の画面を鏡像にしません（ロゴの文字が反転して見えないように）
+- **ロゴの位置:** 会議画面のタイルは映像の端が切り取られて表示されるため、ロゴは切れない範囲（右上から少し内側）に入れています
+- **負荷:** 古い機種や低電力モードでは映像がカクつくことがあります
+
+背景画像は `frontend/backgrounds/` にあり、選択肢は `frontend/config.js` の `BACKGROUNDS` で定義しています。画像を追加するときは、縦長・横長・サムネイル（120×160）の 3 枚を同じ名前で置いてください。
 
 ## AI モデルの選定
 
@@ -189,7 +203,9 @@ backend/          Lambda (handler.js がルーター)
   meeting.js      会議時間（開始時刻の保存・終了時の強制退出）
 frontend/         静的ファイル（ビルド不要）
   app.js          画面・Vonage・字幕のロジック
-  config.js       「Powered by Vonage」リンクの URL・UTM 設定
+  config.js       「Powered by Vonage」リンクの URL・UTM 設定、バーチャル背景の選択肢
+  background.js   バーチャル背景（SDK のビデオフィルター）の適用
+  backgrounds/    背景画像（縦長・横長・サムネイル）
   stt-transcribe.js / eventstream.js / pcm-worklet.js   Transcribe Streaming クライアント
   stt-webspeech.js  Web Speech API 版（実験的）
 lib/stack.js      CDK スタック

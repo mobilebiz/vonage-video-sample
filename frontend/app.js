@@ -9,7 +9,8 @@
 import { t } from './i18n.js';
 import { TranscribeStt } from './stt-transcribe.js';
 import { WebSpeechStt } from './stt-webspeech.js';
-import { poweredByHref } from './config.js';
+import { poweredByHref, BACKGROUNDS } from './config.js';
+import * as vbg from './background.js';
 
 const params = new URLSearchParams(location.search);
 const ROOM = params.get('room') || 'demo';
@@ -23,6 +24,7 @@ const $ = (sel) => document.querySelector(sel);
 const state = {
   lang: 'ja',
   name: '',
+  background: 'none',
   session: null,
   publisher: null,
   join: null, // /api/join のレスポンス
@@ -34,6 +36,7 @@ const state = {
   history: [], // 翻訳の文脈用（確定した発言の原文）
   leaving: false,
   meetingEndsAt: 0, // この端末の時計での会議終了時刻 (ms)
+  camera: null, // 背景フィルター用に自前で取得したカメラ（createUprightCamera）
   timer: null,
 };
 
@@ -93,6 +96,7 @@ function initLogin() {
   $('#room-label').textContent = ROOM;
   $('#powered-by').href = poweredByHref();
   const saved = JSON.parse(localStorage.getItem('vvs-profile') || '{}');
+  initBackgroundPicker(saved.background);
   if (saved.name) $('#name').value = saved.name;
   const initialLang = saved.lang || (navigator.language?.startsWith('ja') ? 'ja' : 'en');
   document.querySelector(`input[name=lang][value=${initialLang}]`).checked = true;
@@ -113,6 +117,31 @@ function initLogin() {
   $('#leave-btn').addEventListener('click', () => leave('left'));
 }
 
+function initBackgroundPicker(savedId) {
+  if (!vbg.isSupported()) return; // 非対応の端末では選択欄ごと出さない
+  const initial = vbg.findBackground(savedId).id;
+  const box = $('#bg-options');
+  for (const bg of BACKGROUNDS) {
+    const label = document.createElement('label');
+    label.className = `bg-option bg-${bg.type}`;
+    const input = document.createElement('input');
+    input.type = 'radio';
+    input.name = 'bg';
+    input.value = bg.id;
+    input.checked = bg.id === initial;
+    const face = document.createElement('span');
+    face.className = 'face';
+    if (bg.thumb) face.style.backgroundImage = `url("${bg.thumb}")`;
+    const text = document.createElement('span');
+    text.className = 'text';
+    text.dataset.i18n = bg.label;
+    text.textContent = t(state.lang, bg.label);
+    label.append(input, face, text);
+    box.append(label);
+  }
+  $('#bg-field').hidden = false;
+}
+
 function loginError(msg) {
   const el = $('#login-error');
   el.textContent = msg;
@@ -126,7 +155,8 @@ async function login() {
   if (!name || [...name].length > 20) { loginError(t(state.lang, 'errName')); return; }
   if (OT.checkSystemRequirements() !== 1) { loginError(t(state.lang, 'errUnsupported')); return; }
   state.name = name;
-  localStorage.setItem('vvs-profile', JSON.stringify({ name, lang: state.lang }));
+  state.background = vbg.isSupported() ? (document.querySelector('input[name=bg]:checked')?.value || 'none') : 'none';
+  localStorage.setItem('vvs-profile', JSON.stringify({ name, lang: state.lang, background: state.background }));
 
   // iOS Safari ではユーザー操作の中で AudioContext を作らないと音声処理が始まらない
   if (!state.audioContext) {
@@ -286,32 +316,74 @@ const VIDEO_OPTS = {
   showControls: false,
 };
 
-function startPublishing() {
-  const myId = state.session.connection.connectionId;
+async function startPublishing() {
+  const { session } = state; // この呼び出しが属する会議（待っている間に退出・再入室された場合の判定用）
+  const isStale = () => state.leaving || state.session !== session;
+  const myId = session.connection.connectionId;
   const tile = getTile(myId);
+  // 背景を使うときは、回転情報を持たないカメラ映像を自前で作って渡す（スマホで映像が横倒しになるのを防ぐ）
+  let camera = null;
+  let sources = {};
+  if (state.background !== 'none' && vbg.isSupported()) {
+    try {
+      camera = await vbg.createUprightCamera({ frameRate: 15 });
+    } catch (err) {
+      console.error(err);
+      if (!isStale()) toast(t(state.lang, 'errMedia'));
+      return;
+    }
+    if (isStale()) { camera.stop(); return; } // 前の会議の分は捨てる
+    state.camera = camera;
+    sources = { videoSource: camera.videoTrack, audioSource: camera.audioTrack };
+  }
+  const releaseCamera = () => {
+    camera?.stop();
+    if (state.camera === camera) state.camera = null;
+  };
+  const initialOrientation = camera?.orientation();
   const publisher = OT.initPublisher(tile.querySelector('.video'), {
     ...VIDEO_OPTS,
+    ...sources,
     resolution: '640x480',
     frameRate: 15,
-    mirror: true,
-    publishAudio: true,
-    publishVideo: true,
-  }, (err) => {
+    // 背景画像のときは鏡像にしない（自分の画面でロゴや文字が左右反転して見えるため）
+    mirror: !vbg.usesImage(state.background),
+    ...(camera ? { videoFilter: vbg.initialFilter(state.background, initialOrientation) } : {}),
+    // カメラの準備中にミュート・ビデオ OFF が押されていたら、その状態で始める
+    publishAudio: state.micOn,
+    publishVideo: state.camOn,
+  }, async (err) => {
     if (err) {
       console.error(err);
-      toast(t(state.lang, 'errMedia'));
+      releaseCamera();
+      if (!isStale()) toast(t(state.lang, 'errMedia'));
+      return;
     }
+    // 背景を選んだ人の映像は、フィルターが確実にかかったことを確かめてから配信する（素の映像が相手に届かないように）
+    try {
+      if (camera) await vbg.confirmBackground(publisher, state.background, initialOrientation);
+    } catch (filterErr) {
+      if (isStale()) return; // 前の会議の分の失敗で、今の会議の状態を変えない
+      console.warn('video filter', filterErr);
+      toast(t(state.lang, 'errFilter'));
+      // 失敗したら映像はオフにして音声だけで参加する。カメラを入れ直すかは本人が選ぶ
+      state.camOn = false;
+      publisher.publishVideo(false);
+      tile.classList.add('video-off');
+      updateControls();
+    }
+    if (isStale() || state.publisher !== publisher) return;
+    session.publish(publisher, (pubErr) => {
+      if (pubErr) { console.error(pubErr); toast(t(state.lang, 'errConnect', { msg: pubErr.message })); return; }
+      tile.classList.toggle('video-off', !state.camOn);
+      startStt();
+    });
   });
   state.publisher = publisher;
+  vbg.watchOrientation(publisher, state.background, (err) => { console.warn('video filter', err); toast(t(state.lang, 'errFilter')); });
   publisher.on('accessDenied', () => toast(t(state.lang, 'errMedia')));
   publisher.on('videoElementCreated', () => tile.classList.toggle('video-off', !state.camOn));
   publisher.on('audioLevelUpdated', (e) => tile.classList.toggle('speaking', state.micOn && e.audioLevel > 0.08));
-
-  state.session.publish(publisher, (err) => {
-    if (err) { console.error(err); toast(t(state.lang, 'errConnect', { msg: err.message })); return; }
-    tile.classList.toggle('video-off', !state.camOn);
-    startStt();
-  });
   updateControls();
 }
 
@@ -370,6 +442,8 @@ function leave(reason) {
   state.session?.disconnect();
   state.session = null;
   state.publisher = null;
+  state.camera?.stop();
+  state.camera = null;
   clearTimeout(partialTimer);
   $('#grid').innerHTML = '';
   $('#captions').innerHTML = '';
@@ -380,6 +454,8 @@ function leave(reason) {
 function backToLogin(reason) {
   $('#name').value = state.name;
   document.querySelector(`input[name=lang][value=${state.lang}]`).checked = true;
+  const bgInput = document.querySelector(`input[name=bg][value="${state.background}"]`);
+  if (bgInput) bgInput.checked = true;
   applyI18n(state.lang);
   const messages = {
     full: t(state.lang, 'errRoomFull', { n: state.join?.maxParticipants || 4 }),
