@@ -39,8 +39,14 @@ const applied = new WeakMap(); // publisher -> 適用済みの画像の向き
 export async function applyBackground(publisher, id) {
   if (findBackground(id).type === 'none') return;
   if (!isSupported()) throw new Error('video filters are not supported on this device');
-  const orientation = orientationOf(publisher);
+  let orientation = orientationOf(publisher);
   await publisher.applyVideoFilter(videoFilterFor(id, orientation));
+  // 適用中に端末が回転していたら（その間の videoDimensionsChanged は捨てている）、今の向きで掛け直す
+  const now = orientationOf(publisher);
+  if (now !== orientation) {
+    await publisher.applyVideoFilter(videoFilterFor(id, now));
+    orientation = now;
+  }
   applied.set(publisher, orientation);
 }
 
