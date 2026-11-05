@@ -363,6 +363,7 @@ async function startPublishing() {
     try {
       if (camera) await vbg.confirmBackground(publisher, state.background, initialOrientation);
     } catch (filterErr) {
+      if (isStale()) return; // 前の会議の分の失敗で、今の会議の状態を変えない
       console.warn('video filter', filterErr);
       toast(t(state.lang, 'errFilter'));
       // 失敗したら映像はオフにして音声だけで参加する。カメラを入れ直すかは本人が選ぶ
